@@ -135,7 +135,7 @@ program
   .option('-d, --device <serial>',         'Target specific device serial')
   .option('-c, --cmd <command>',           'Test command (adb:|instrument:|local:)')
   .option('--activity <name>',             'Activity name for startup time measurement')
-  .option('--name <label>',               'Human-readable job name')
+  .option('--label <label>',              'Human-readable job name')
   .option('--branch <branch>',            'Git branch (metadata)')
   .option('--commit <sha>',               'Git commit SHA (metadata)')
   .action(async (opts) => {
@@ -157,7 +157,7 @@ program
       activity:     opts.activity,
       testCommand:  opts.cmd,
       metadata: {
-        name:   opts.name,
+        name:   opts.label,
         branch: opts.branch,
         commit: opts.commit,
       },
