@@ -1,0 +1,167 @@
+# k8s/deployment.yaml
+# EKS deployment for Device Farm
+# Apply with: kubectl apply -f k8s/
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: device-farm
+
+---
+# Persistent storage for DB, reports, screenshots
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: farm-data
+  namespace: device-farm
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: device-farm
+  namespace: device-farm
+  labels:
+    app: device-farm
+spec:
+  replicas: 1          # Always 1 — ADB server must be singleton
+  selector:
+    matchLabels:
+      app: device-farm
+  template:
+    metadata:
+      labels:
+        app: device-farm
+    spec:
+      # Must run on a specific node where the USB device is physically attached
+      # Add this label to your EC2 node: kubectl label node <node> device-farm=true
+      nodeSelector:
+        device-farm: "true"
+
+      containers:
+        - name: device-farm
+          image: YOUR_ECR_REGISTRY/device-farm:latest
+          ports:
+            - containerPort: 3000   # API + dashboard
+            - containerPort: 4723   # Appium
+            - containerPort: 5037   # ADB
+            - containerPort: 5555   # ADB WiFi
+          env:
+            - name: PORT
+              value: "3000"
+            - name: NODE_ENV
+              value: "production"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: farm-data
+              mountPath: /app/data
+            # USB device passthrough — requires privileged mode
+            - name: usb
+              mountPath: /dev/bus/usb
+          securityContext:
+            privileged: true        # Required for ADB USB access
+          livenessProbe:
+            httpGet:
+              path: /api/stats
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/stats
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 5
+
+      volumes:
+        - name: farm-data
+          persistentVolumeClaim:
+            claimName: farm-data
+        - name: usb
+          hostPath:
+            path: /dev/bus/usb      # Passes host USB through to container
+
+---
+# Internal service
+apiVersion: v1
+kind: Service
+metadata:
+  name: device-farm
+  namespace: device-farm
+spec:
+  selector:
+    app: device-farm
+  ports:
+    - name: api
+      port: 3000
+      targetPort: 3000
+    - name: appium
+      port: 4723
+      targetPort: 4723
+    - name: adb
+      port: 5037
+      targetPort: 5037
+    - name: adb-wifi
+      port: 5555
+      targetPort: 5555
+
+---
+# External LoadBalancer for dashboard access
+apiVersion: v1
+kind: Service
+metadata:
+  name: device-farm-external
+  namespace: device-farm
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app: device-farm
+  ports:
+    - name: https
+      port: 443
+      targetPort: 3000
+    - name: adb-wifi
+      port: 5555
+      targetPort: 5555
+
+---
+# Ingress for HTTPS dashboard
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: device-farm
+  namespace: device-farm
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: YOUR_ACM_CERTIFICATE_ARN
+spec:
+  rules:
+    - host: device-farm.YOUR_DOMAIN.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: device-farm
+                port:
+                  number: 3000

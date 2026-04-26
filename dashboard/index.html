@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Device Farm</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #f8f8f7;
+    --surface: #ffffff;
+    --border:  #e4e2dc;
+    --text:    #1a1a18;
+    --muted:   #6b6b68;
+    --green:   #1d9e75;
+    --amber:   #ba7517;
+    --red:     #a32d2d;
+    --blue:    #185fa5;
+    --purple:  #534ab7;
+    --radius:  8px;
+  }
+
+  body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    height: 52px;
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  .ws-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+  .ws-dot.connected { background: var(--green); }
+  .ws-status { font-size: 12px; color: var(--muted); }
+
+  .layout { display: grid; grid-template-columns: 280px 1fr; gap: 0; height: calc(100vh - 52px); }
+
+  /* Sidebar */
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; }
+  .sidebar-section { padding: 16px; border-bottom: 1px solid var(--border); }
+  .sidebar-section h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 10px; }
+
+  .device-card {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .device-card:hover { border-color: var(--blue); }
+  .device-card.selected { border-color: var(--blue); background: #e6f1fb30; }
+  .device-card .model { font-weight: 500; font-size: 13px; }
+  .device-card .serial { font-size: 11px; color: var(--muted); font-family: monospace; }
+  .device-card .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .badge.idle    { background: #eaf3de; color: #3b6d11; }
+  .badge.busy    { background: #faeeda; color: #854f0b; }
+  .badge.offline { background: #f1efe8; color: #5f5e5a; }
+
+  .stat-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .stat-row .label { color: var(--muted); }
+
+  /* Main */
+  .main { overflow-y: auto; padding: 20px 24px; }
+  .main-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .main-header h2 { font-size: 16px; font-weight: 600; }
+
+  .stats-bar {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .stat-card .num { font-size: 22px; font-weight: 600; }
+  .stat-card .lbl { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* Job table */
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  thead { background: var(--bg); }
+  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { font-weight: 500; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  tr:last-child td { border-bottom: none; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: #f5f5f3; }
+
+  .job-status { display: inline-flex; align-items: center; gap: 5px; }
+  .job-status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .job-status.passed   { color: var(--green); }
+  .job-status.failed   { color: var(--red); }
+  .job-status.running  { color: var(--amber); }
+  .job-status.queued   { color: var(--muted); }
+  .job-status.cancelled { color: var(--muted); }
+
+  /* Log console */
+  .log-console {
+    background: #1a1a18;
+    color: #c2c0b6;
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-size: 12px;
+    font-family: monospace;
+    height: 160px;
+    overflow-y: auto;
+    margin-top: 20px;
+  }
+  .log-console .log-entry { padding: 1px 0; line-height: 1.6; }
+  .log-console .log-ts { color: #5f5e5a; margin-right: 8px; }
+
+  /* Job detail panel */
+  .detail-panel {
+    position: fixed; right: 0; top: 52px;
+    width: 480px; height: calc(100vh - 52px);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    transform: translateX(100%);
+    transition: transform .25s ease;
+    overflow-y: auto;
+    z-index: 100;
+    padding: 20px 24px;
+  }
+  .detail-panel.open { transform: translateX(0); }
+  .detail-panel h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; display: flex; justify-content: space-between; }
+  .detail-panel .close-btn { cursor: pointer; color: var(--muted); font-size: 20px; line-height: 1; }
+
+  .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .metric-block { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; }
+  .metric-block .val { font-size: 18px; font-weight: 600; }
+  .metric-block .unit { font-size: 12px; color: var(--muted); }
+  .metric-block .lbl { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* WiFi connect form */
+  .wifi-form { display: flex; gap: 8px; margin-top: 10px; }
+  .wifi-form input { flex: 1; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; font-size: 13px; background: var(--bg); }
+  .wifi-form input:focus { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+  button {
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background .12s;
+  }
+  button:hover { background: var(--bg); }
+  button.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+  button.primary:hover { background: #0c447c; }
+
+  .empty { text-align: center; padding: 40px; color: var(--muted); }
+  .no-device-msg { font-size: 12px; color: var(--muted); padding: 8px 0; }
+
+  .screenshot-row { display: flex; gap: 10px; margin-top: 10px; }
+  .screenshot-row img { width: 50%; border: 1px solid var(--border); border-radius: 6px; }
+
+  @media (max-width: 700px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { display: none; }
+    .detail-panel { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📱 Device Farm</h1>
+  <div class="ws-dot" id="wsDot"></div>
+  <span class="ws-status" id="wsStatus">Connecting…</span>
+  <div style="flex:1"></div>
+  <button onclick="submitJobModal()">+ Submit job</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <h2>Connected devices</h2>
+      <div id="deviceList"><p class="no-device-msg">No devices connected</p></div>
+      <div style="margin-top:10px">
+        <h2 style="margin-bottom:6px">WiFi connect</h2>
+        <div class="wifi-form">
+          <input id="wifiIp" placeholder="192.168.1.x" />
+          <button onclick="connectWifi()">Connect</button>
+        </div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <h2>Stats</h2>
+      <div id="statsSidebar"></div>
+    </div>
+    <div class="sidebar-section">
+      <h2>Live log</h2>
+      <div class="log-console" id="logConsole"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main-header">
+      <h2>Jobs</h2>
+      <div style="display:flex;gap:8px">
+        <select id="filterStatus" onchange="renderJobs()" style="padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;background:var(--surface)">
+          <option value="">All statuses</option>
+          <option value="running">Running</option>
+          <option value="passed">Passed</option>
+          <option value="failed">Failed</option>
+          <option value="queued">Queued</option>
+        </select>
+        <button onclick="loadJobs()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div class="stats-bar" id="statsBar"></div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>Package</th>
+          <th>Device</th>
+          <th>Status</th>
+          <th>FPS</th>
+          <th>Jank</th>
+          <th>Started</th>
+        </tr>
+      </thead>
+      <tbody id="jobTableBody">
+        <tr><td colspan="7" class="empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </main>
+</div>
+
+<!-- Detail panel -->
+<div class="detail-panel" id="detailPanel">
+  <h3>Job detail <span class="close-btn" onclick="closeDetail()">×</span></h3>
+  <div id="detailContent"></div>
+</div>
+
+<script>
+let ws;
+let jobs = [];
+let devices = {};
+let selectedDevice = null;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+
+  ws.onopen = () => {
+    document.getElementById('wsDot').className = 'ws-dot connected';
+    document.getElementById('wsStatus').textContent = 'Live';
+  };
+  ws.onclose = () => {
+    document.getElementById('wsDot').className = 'ws-dot';
+    document.getElementById('wsStatus').textContent = 'Disconnected — retrying…';
+    setTimeout(connectWS, 2000);
+  };
+  ws.onmessage = ({ data }) => {
+    const { type, data: payload } = JSON.parse(data);
+    switch (type) {
+      case 'init':
+        (payload.devices || []).forEach(d => { devices[d.serial] = d; });
+        jobs = payload.jobs || [];
+        renderDevices();
+        renderJobs();
+        renderStats(payload.stats);
+        break;
+      case 'device:connect':
+        devices[payload.serial] = payload;
+        renderDevices();
+        log(`🔌 Device connected: ${payload.model} (${payload.serial})`);
+        break;
+      case 'device:disconnect':
+        delete devices[payload.serial];
+        renderDevices();
+        log(`⛔ Device disconnected: ${payload.serial}`);
+        break;
+      case 'job:queued':
+        log(`📋 Job queued: ${payload.id.slice(0, 8)}`);
+        loadJobs();
+        break;
+      case 'job:start':
+        log(`▶️  Job started: ${payload.id.slice(0, 8)} on ${payload.serial}`);
+        loadJobs();
+        break;
+      case 'job:log':
+        log(payload.msg);
+        break;
+      case 'job:done':
+        log(`${payload.status === 'passed' ? '✅' : '❌'} Job ${payload.id.slice(0, 8)}: ${payload.status}`);
+        loadJobs();
+        break;
+      case 'stats':
+        renderStats(payload);
+        break;
+    }
+  };
+}
+
+// ── Devices ────────────────────────────────────────────────────────────────
+
+function renderDevices() {
+  const el = document.getElementById('deviceList');
+  const list = Object.values(devices);
+  if (!list.length) { el.innerHTML = '<p class="no-device-msg">No devices connected</p>'; return; }
+
+  el.innerHTML = list.map(d => `
+    <div class="device-card ${selectedDevice === d.serial ? 'selected' : ''}" onclick="selectDevice('${d.serial}')">
+      <div class="model">${d.brand} ${d.model}</div>
+      <div class="serial">${d.serial}</div>
+      <div class="row">
+        <span class="badge idle">idle</span>
+        <span style="font-size:11px;color:var(--muted)">API ${d.api} · ${d.os}</span>
+        ${d.battery != null ? `<span style="font-size:11px;color:var(--muted)">🔋${d.battery}%</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function selectDevice(serial) {
+  selectedDevice = selectedDevice === serial ? null : serial;
+  renderDevices();
+  renderJobs();
+}
+
+async function connectWifi() {
+  const ip = document.getElementById('wifiIp').value.trim();
+  if (!ip) return;
+  const res = await fetch('/api/devices/connect', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip }),
+  });
+  const { success } = await res.json();
+  log(success ? `✅ Connected to ${ip}` : `❌ Failed to connect to ${ip}`);
+}
+
+// ── Jobs ───────────────────────────────────────────────────────────────────
+
+async function loadJobs() {
+  const url = selectedDevice
+    ? `/api/jobs?device=${selectedDevice}&limit=50`
+    : '/api/jobs?limit=50';
+  const res = await fetch(url);
+  jobs = await res.json();
+  renderJobs();
+}
+
+function renderJobs() {
+  const filter = document.getElementById('filterStatus').value;
+  const tbody  = document.getElementById('jobTableBody');
+
+  let filtered = jobs;
+  if (filter) filtered = jobs.filter(j => j.status === filter);
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No jobs yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(j => {
+    const meta = j.metadata || {};
+    const name = meta.name || j.id.slice(0, 8);
+    return `
+      <tr class="clickable" onclick="openDetail('${j.id}')">
+        <td><span style="font-family:monospace;font-size:12px">${name}</span></td>
+        <td style="font-size:12px;color:var(--muted)">${j.package_name || '—'}</td>
+        <td style="font-size:12px;color:var(--muted)">${j.device_serial?.slice(-4) || '—'}</td>
+        <td><span class="job-status ${j.status}">${j.status}</span></td>
+        <td>—</td>
+        <td>—</td>
+        <td style="font-size:12px;color:var(--muted)">${j.started_at ? timeAgo(j.started_at) : '—'}</td>
+      </tr>`;
+  }).join('');
+}
+
+// ── Job detail ─────────────────────────────────────────────────────────────
+
+async function openDetail(jobId) {
+  const res  = await fetch(`/api/jobs/${jobId}`);
+  const job  = await res.json();
+  const panel = document.getElementById('detailPanel');
+  const content = document.getElementById('detailContent');
+
+  const native    = job.results?.find(r => r.metric_type === 'native')?.payload;
+  const startup   = job.results?.find(r => r.metric_type === 'startup')?.payload;
+  const flashlight = job.results?.find(r => r.metric_type === 'flashlight')?.payload;
+
+  let html = `
+    <p style="font-size:12px;color:var(--muted);margin-bottom:16px">
+      ${job.package_name} · ${job.device_serial || 'any device'} · 
+      <span class="job-status ${job.status}">${job.status}</span>
+    </p>`;
+
+  if (native) {
+    html += `<h4 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:8px">Performance metrics</h4>
+    <div class="metric-grid">
+      ${metricBlock(native.avgFps, 'fps', 'Avg FPS')}
+      ${metricBlock(native.avgJankyPct, '%', 'Jank rate')}
+      ${metricBlock(native.p99Avg, 'ms', 'P99 frame')}
+      ${metricBlock(native.avgCpu, '%', 'Avg CPU')}
+      ${metricBlock(native.avgMemMb, 'MB', 'Avg memory')}
+      ${metricBlock(native.sampleCount, '', 'Samples')}
+    </div>`;
+  }
+
+  if (startup) {
+    html += `<h4 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px">Startup time</h4>
+    <div class="metric-grid">
+      ${metricBlock(startup.cold?.avg, 'ms', 'Cold start')}
+      ${metricBlock(startup.warm?.avg, 'ms', 'Warm start')}
+    </div>`;
+  }
+
+  if (flashlight) {
+    html += `<h4 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px">Flashlight report</h4>
+    <a href="/reports/${encodeURIComponent(flashlight.reportPath?.split('/').pop() || '')}" target="_blank" 
+       style="color:var(--blue);font-size:13px">Open full report →</a>`;
+  }
+
+  const screenshots = [
+    { label: 'Before', url: `/screenshots/${jobId}_before.png` },
+    { label: 'After',  url: `/screenshots/${jobId}_after.png` },
+  ];
+  html += `<h4 style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 8px">Screenshots</h4>
+    <div class="screenshot-row">
+      ${screenshots.map(s => `<img src="${s.url}" onerror="this.style.display='none'" title="${s.label}">`).join('')}
+    </div>`;
+
+  content.innerHTML = html;
+  panel.classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+}
+
+function metricBlock(val, unit, label) {
+  return `<div class="metric-block">
+    <div class="val">${val ?? '—'}<span class="unit"> ${unit}</span></div>
+    <div class="lbl">${label}</div>
+  </div>`;
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+
+function renderStats(stats) {
+  if (!stats) return;
+  document.getElementById('statsBar').innerHTML = `
+    ${statCard(stats.total_jobs, 'Total jobs')}
+    ${statCard(stats.passed, 'Passed', 'var(--green)')}
+    ${statCard(stats.failed, 'Failed', 'var(--red)')}
+    ${statCard(stats.running, 'Running', 'var(--amber)')}
+    ${statCard(stats.known_devices, 'Known devices')}
+  `;
+  document.getElementById('statsSidebar').innerHTML = `
+    <div class="stat-row"><span class="label">Total jobs</span><span>${stats.total_jobs}</span></div>
+    <div class="stat-row"><span class="label">Passed</span><span style="color:var(--green)">${stats.passed}</span></div>
+    <div class="stat-row"><span class="label">Failed</span><span style="color:var(--red)">${stats.failed}</span></div>
+    <div class="stat-row"><span class="label">Running</span><span style="color:var(--amber)">${stats.running}</span></div>
+  `;
+}
+
+function statCard(num, label, color = '') {
+  return `<div class="stat-card">
+    <div class="num" style="color:${color}">${num ?? 0}</div>
+    <div class="lbl">${label}</div>
+  </div>`;
+}
+
+// ── Log ────────────────────────────────────────────────────────────────────
+
+function log(msg) {
+  const el  = document.getElementById('logConsole');
+  const ts  = new Date().toTimeString().slice(0, 8);
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="log-ts">${ts}</span>${escapeHtml(msg)}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  if (el.children.length > 200) el.removeChild(el.firstChild);
+}
+
+function submitJobModal() {
+  const pkg = prompt('Package name (e.g. com.myapp):');
+  if (!pkg) return;
+  const cmd = prompt('Test command (optional)\nFormats:\n  adb:am start com.myapp/.MainActivity\n  local:maestro test flow.yaml\n  instrument:com.myapp.test/com.myapp.MyRunner') || '';
+  const name = prompt('Job name (optional):') || '';
+  fetch('/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ packageName: pkg, testCommand: cmd || undefined, metadata: { name } }),
+  }).then(r => r.json()).then(j => log(`Job submitted: ${j.id}`));
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function timeAgo(dt) {
+  const s = Math.round((Date.now() - new Date(dt + 'Z').getTime()) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s/60)}m ago`;
+  return `${Math.round(s/3600)}h ago`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+
+connectWS();
+loadJobs();
+setInterval(loadJobs, 10000);
+</script>
+</body>
+</html>

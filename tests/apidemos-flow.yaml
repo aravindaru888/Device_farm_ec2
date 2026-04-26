@@ -1,0 +1,22 @@
+# tests/apidemos-flow.yaml
+appId: io.appium.android.apis
+---
+- launchApp
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      text: "App"
+    direction: DOWN
+- tapOn:
+    text: "App"
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      text: "Action Bar"
+    direction: DOWN
+- tapOn:
+    text: "Action Bar"
+- waitForAnimationToEnd
+- scroll
+- scroll
+- scroll

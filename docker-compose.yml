@@ -1,0 +1,58 @@
+# docker-compose.yml
+# Local cloud-ready setup — mirrors exactly what runs on EC2/EKS
+# Usage: docker compose up
+
+services:
+
+  # ── Device Farm Server ──────────────────────────────────────────────────────
+  device-farm:
+    build: .
+    container_name: device-farm
+    ports:
+      - "3000:3000"   # Dashboard + REST API
+      - "4723:4723"   # Appium
+      - "5037:5037"   # ADB server
+    volumes:
+      - farm-data:/app/data          # Persistent: DB, reports, screenshots
+      - /dev/bus/usb:/dev/bus/usb    # USB device passthrough (local only)
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - ADB_SERVER_SOCKET=tcp:5037
+    privileged: true                 # Required for USB device access
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── ADB over TCP tunnel ─────────────────────────────────────────────────────
+  # Exposes ADB port so your phone can connect remotely
+  adb-tunnel:
+    image: alpine/socat
+    container_name: adb-tunnel
+    ports:
+      - "5555:5555"   # Phone connects here via WiFi ADB
+    command: TCP-LISTEN:5555,fork TCP:device-farm:5037
+    depends_on:
+      - device-farm
+    restart: unless-stopped
+
+  # ── Nginx reverse proxy ─────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: device-farm-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro    # Mount SSL certs
+    depends_on:
+      - device-farm
+    restart: unless-stopped
+
+volumes:
+  farm-data:
+    driver: local
