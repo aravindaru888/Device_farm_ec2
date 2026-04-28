@@ -25,26 +25,26 @@ class ADBManager extends EventEmitter {
 
   // ── discovery ─────────────────────────────────────────────────────────────
 
-  listConnected() {
-    const raw = this._run('devices -l');
-    if (!raw) return [];
+listConnected() {
+  const raw = this._run('devices -l');
+  if (!raw) return [];
 
-    return raw
-      .split('\n')
-      .slice(1) // skip "List of devices attached"
-      .filter(l => l.includes('\t'))
-      .map(line => {
-        const parts = line.trim().split(/\s+/);
-        const serial = parts[0];
-        const state = parts[1]; // device | offline | unauthorized
-        const props = {};
-        parts.slice(2).forEach(kv => {
-          const [k, v] = kv.split(':');
-          if (k && v) props[k] = v;
-        });
-        return { serial, state, ...props };
-      });
-  }
+  console.log('[debug] raw adb output:', JSON.stringify(raw));
+
+  return raw
+    .split('\n')
+    .slice(1)
+    .filter(l => l.trim())
+    .map(line => {
+      const trimmed = line.trim();
+      const parts = trimmed.split(/\s+/);
+      const serial = parts[0];
+      const state = parts[1];
+      console.log('[debug] parsed:', serial, state);
+      return { serial, state };
+    })
+    .filter(d => d.state === 'device');
+}
 
   getDeviceInfo(serial) {
     const model = this._runDevice(serial, 'shell getprop ro.product.model') || 'Unknown';
