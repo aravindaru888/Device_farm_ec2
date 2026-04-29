@@ -82,6 +82,11 @@ const upsertDevice = db.prepare(`
     last_seen = excluded.last_seen
 `);
 
+const addDevice = db.prepare(`
+  INSERT OR IGNORE INTO devices (serial, last_seen)
+  VALUES (@serial, datetime('now'))
+`);
+
 const getDevice    = db.prepare('SELECT * FROM devices WHERE serial = ?');
 const listDevices  = db.prepare('SELECT * FROM devices ORDER BY last_seen DESC');
 
@@ -145,6 +150,7 @@ module.exports = {
   db,
   // devices
   upsertDevice: (d) => upsertDevice.run(d),
+  addDevice:    (d) => addDevice.run(d),
   getDevice:    (s) => getDevice.get(s),
   listDevices:  ()  => listDevices.all(),
   setDeviceTags:(s, tags) => setDeviceTags.run(JSON.stringify(tags), s),
