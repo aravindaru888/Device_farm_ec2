@@ -53,14 +53,20 @@ function getMergedDevices() {
 
   return [...serials].map(serial => {
     const dbDevice = known.find(d => d.serial === serial) || {};
+    const adbDevice = adbMap.get(serial) || {};
     return {
       serial,
+      model: dbDevice.model || adbDevice.model || 'Unknown',
+      brand: dbDevice.brand || adbDevice.brand || 'Unknown',
+      api: dbDevice.api || adbDevice.api || '?',
+      os: dbDevice.os || adbDevice.os || '?',
+      arch: dbDevice.arch || adbDevice.arch || '?',
       tags: JSON.parse(dbDevice.tags || '[]'),
       connected: adbMap.has(serial),
       status: queue._running.has(serial)
         ? 'busy'
         : (adbMap.has(serial) ? 'idle' : 'offline'),
-      battery: adbMap.get(serial)?.battery ?? null,
+      battery: adbDevice.battery ?? null,
     };
   });
 }
