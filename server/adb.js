@@ -25,26 +25,44 @@ class ADBManager extends EventEmitter {
 
   // ── discovery ─────────────────────────────────────────────────────────────
 
-listConnected() {
-  const raw = this._run('devices -l');
-  if (!raw) return [];
+  listConnected() {
+    const raw = this._run('devices -l');
+    if (!raw) return [];
 
-  console.log('[debug] raw adb output:', JSON.stringify(raw));
+    console.log('[debug] raw adb output:', JSON.stringify(raw));
 
-  return raw
-    .split('\n')
-    .slice(1)
-    .filter(l => l.trim())
-    .map(line => {
-      const trimmed = line.trim();
-      const parts = trimmed.split(/\s+/);
-      const serial = parts[0];
-      const state = parts[1];
-      console.log('[debug] parsed:', serial, state);
-      return { serial, state };
-    })
-    .filter(d => d.state === 'device')
-    .filter(d => !d.serial.includes('_adb-tls-connect')); // ignore mDNS/avahi entries
+    return raw
+      .split('\n')
+      .slice(1)
+      .filter(l => l.trim())
+      .map(line => {
+        const trimmed = line.trim();
+        const parts = trimmed.split(/\s+/);
+        const serial = parts[0];
+        const state = parts[1];
+        console.log('[debug] parsed:', serial, state);
+        return { serial, state };
+      })
+      .filter(d => d.state === 'device')
+      .filter(d => !d.serial.includes('_adb-tls-connect')); // ignore mDNS/avahi entries
+  }
+
+  getDeviceInfo(serial) {
+    const model = this._runDevice(serial, 'shell getprop ro.product.model') || 'Unknown';
+    const brand = this._runDevice(serial, 'shell getprop ro.product.brand') || 'Unknown';
+    const api   = this._runDevice(serial, 'shell getprop ro.build.version.sdk') || '?';
+    const os    = this._runDevice(serial, 'shell getprop ro.build.version.release') || '?';
+    const arch  = this._runDevice(serial, 'shell getprop ro.product.cpu.abi') || '?';
+    const batRaw = this._runDevice(serial, 'shell dumpsys battery | grep level');
+    const battery = batRaw ? parseInt(batRaw.match(/\d+/)?.[0] ?? '0') : null;
+
+    return { serial, model, brand, api, os, arch, battery };
+  }
+
+  // ── device polling ────────────────────────────────────────────────────────
+
+  startPolling(intervalMs = 3000) {
+    this._pollInterval = setInterval(() => this._poll(), intervalMs);
     this._poll(); // immediate first pass
   }
 
