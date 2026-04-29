@@ -31,7 +31,7 @@ class ADBManager extends EventEmitter {
 
     console.log('[debug] raw adb output:', JSON.stringify(raw));
 
-    return raw
+    const result = raw
       .split('\n')
       .slice(1)
       .filter(l => l.trim())
@@ -45,6 +45,9 @@ class ADBManager extends EventEmitter {
       })
       .filter(d => d.state === 'device')
       .filter(d => !d.serial.includes('_adb-tls-connect'));
+    
+    console.log('[debug] filtered result:', result.map(d => d.serial));
+    return result;
   }
 
   getDeviceInfo(serial) {
