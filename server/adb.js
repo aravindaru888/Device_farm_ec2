@@ -29,9 +29,7 @@ class ADBManager extends EventEmitter {
     const raw = this._run('devices -l');
     if (!raw) return [];
 
-    console.log('[debug] raw adb output:', JSON.stringify(raw));
-
-    const result = raw
+    return raw
       .split('\n')
       .slice(1)
       .filter(l => l.trim())
@@ -40,14 +38,10 @@ class ADBManager extends EventEmitter {
         const parts = trimmed.split(/\s+/);
         const serial = parts[0];
         const state = parts[1];
-        console.log('[debug] parsed:', serial, state);
         return { serial, state };
       })
       .filter(d => d.state === 'device')
       .filter(d => !d.serial.includes('_adb-tls-connect'));
-    
-    console.log('[debug] filtered result:', result.map(d => d.serial));
-    return result;
   }
 
   getDeviceInfo(serial) {
