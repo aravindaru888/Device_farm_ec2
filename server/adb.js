@@ -44,7 +44,7 @@ class ADBManager extends EventEmitter {
         return { serial, state };
       })
       .filter(d => d.state === 'device')
-      .filter(d => !d.serial.includes('_adb-tls-connect')); // ignore mDNS/avahi entries
+      .filter(d => !d.serial.includes('_adb-tls-connect'));
   }
 
   getDeviceInfo(serial) {
