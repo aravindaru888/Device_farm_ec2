@@ -96,9 +96,13 @@ adb.on('device:connect', d => {
 
   const exists = db.listDevices().find(dev => dev.serial === d.serial);
   if (!exists) {
-    db.addDevice({
+    db.upsertDevice({
       serial: d.serial,
-      tags: JSON.stringify([]),
+      model: d.model || 'Unknown',
+      brand: d.brand || 'Unknown',
+      api: d.api || '?',
+      os: d.os || '?',
+      arch: d.arch || '?',
     });
   }
 
