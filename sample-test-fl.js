@@ -30,7 +30,7 @@ async function main() {
   });
 
   console.log(`[farm] Running on: ${device.serial} (${device.brand} ${device.model})\n`);
-
+  
   try {
     // Define the Flashlight test case
     const testCase = {
@@ -85,7 +85,12 @@ async function main() {
 
     // Run Flashlight measurement — captures CPU, FPS, jank, memory
     console.log('[flashlight] Starting performance measurement...');
-    const { writeResults } = await measurePerformance(APP_PACKAGE, testCase);
+    process.env.ANDROID_SERIAL = device.serial;
+
+    const { writeResults } = await measurePerformance(APP_PACKAGE, testCase ,{
+  serial: device.serial,
+  iterationCount: 2, 
+});
 
     // Save results to farm reports directory
     const reportPath = `${__dirname}/../data/reports/results_${Date.now()}.json`;
@@ -93,10 +98,10 @@ async function main() {
 
     console.log('\n════════════════════════════════');
     console.log('✅ Test complete!');
-    console.log(`📊 Report saved to: ${reportPath}`);
+    console.log(`📊 Report saved to: /home/ubuntu/device-farm/`);
     console.log('\nTo view report:');
     console.log(`  1. Download from EC2:`);
-    console.log(`     scp -i DeviceFarm.pem ubuntu@13.239.102.204:${reportPath} ./report.json`);
+    console.log(`     scp -i DeviceFarm.pem ubuntu@13.239.102.204:/home/ubuntu/device-farm/ ./report.json`);
     console.log(`  2. Open on your laptop:`);
     console.log(`     flashlight report ./report.json`);
     console.log('════════════════════════════════\n');
