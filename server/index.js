@@ -18,8 +18,20 @@ fs.mkdirSync(UPLOADS, { recursive: true });
 
 const app    = express();
 const server = http.createServer(app);
-const wss    = new ws.WebSocketServer({ server });
+const wss           = new ws.WebSocketServer({ noServer: true });
+const wssTestRunner = new ws.WebSocketServer({ noServer: true });
 
+server.on('upgrade', (req, socket, head) => {
+  if (req.url === '/test-runner') {
+    wssTestRunner.handleUpgrade(req, socket, head, client =>
+      wssTestRunner.emit('connection', client, req)
+    );
+  } else {
+    wss.handleUpgrade(req, socket, head, client =>
+      wss.emit('connection', client, req)
+    );
+  }
+});
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../dashboard')));
 app.use('/screenshots', express.static(path.join(__dirname, '../data/screenshots')));
@@ -178,6 +190,118 @@ app.get('/api/stats', (req, res) => res.json({ ...db.getStats(), queue: queue.st
 
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+const ALLOWED_TESTS = ['sample-test-fl.js', 'sample-test.js'];
+const FARM_DIR      = path.join(__dirname, '..');   // ~/device-farm
+
+// ── API: Deploy test file ─────────────────────────────────────────────────────
+app.post('/api/deploy', express.json({ limit: '10mb' }), (req, res) => {
+  const { filename, content } = req.body || {};
+
+  if (!filename || !ALLOWED_TESTS.includes(filename))
+    return res.status(400).json({ error: `Not allowed. Permitted: ${ALLOWED_TESTS.join(', ')}` });
+  if (typeof content !== 'string')
+    return res.status(400).json({ error: 'Missing content' });
+
+  try {
+    fs.writeFileSync(path.join(FARM_DIR, filename), content, 'utf8');
+    console.log(`[deploy] Wrote ${filename}`);
+    res.json({ ok: true, filename });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── API: List reports ─────────────────────────────────────────────────────────
+app.get('/api/reports', (req, res) => {
+  try {
+    const reports = fs.readdirSync(FARM_DIR)
+      .filter(f => f.startsWith('results_') && f.endsWith('.json'))
+      .sort().reverse();
+    res.json({ reports });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── API: Download a report ────────────────────────────────────────────────────
+app.get('/api/reports/:filename', (req, res) => {
+  const filename = path.basename(req.params.filename);
+  if (!filename.startsWith('results_') || !filename.endsWith('.json'))
+    return res.status(400).json({ error: 'Invalid filename' });
+
+  const filePath = path.join(FARM_DIR, filename);
+  if (!fs.existsSync(filePath))
+    return res.status(404).json({ error: 'Not found' });
+
+  res.download(filePath);
+});
+
+// ── API: Delete all reports ───────────────────────────────────────────────────
+app.delete('/api/reports', (req, res) => {
+  try {
+    const files = fs.readdirSync(FARM_DIR)
+      .filter(f => f.startsWith('results_') && f.endsWith('.json'));
+    files.forEach(f => fs.unlinkSync(path.join(FARM_DIR, f)));
+    console.log(`[reports] Deleted ${files.length} report(s)`);
+    res.json({ ok: true, deleted: files.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── WebSocket: /test-runner ───────────────────────────────────────────────────
+// client → { run: 'sample-test-fl.js' }
+// server → { type: 'log',   line: '...' }
+// server → { type: 'done',  exitCode: 0 }
+// server → { type: 'error', message: '...' }
+const { exec } = require('child_process');
+
+wssTestRunner.on('connection', (socket) => {
+  console.log('[test-runner] Client connected');
+
+  socket.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); }
+    catch { return send({ type: 'error', message: 'Invalid JSON' }); }
+
+    const testFile = msg.run;
+    if (!testFile || !ALLOWED_TESTS.includes(testFile))
+      return send({ type: 'error', message: `Not allowed: ${testFile}` });
+
+    const filePath = path.join(FARM_DIR, testFile);
+    if (!fs.existsSync(filePath))
+      return send({ type: 'error', message: `File not found: ${testFile}` });
+
+    console.log(`[test-runner] Starting: node ${testFile}`);
+
+    function send(obj) {
+      if (socket.readyState === ws.OPEN)
+        socket.send(JSON.stringify(obj));
+    }
+
+    const proc = exec(`node ${testFile}`, { cwd: FARM_DIR });
+
+    proc.stdout.on('data', data =>
+      data.toString().split('\n').filter(Boolean).forEach(line => send({ type: 'log', line }))
+    );
+    proc.stderr.on('data', data =>
+      data.toString().split('\n').filter(Boolean).forEach(line => send({ type: 'log', line }))
+    );
+    proc.on('close', exitCode => {
+      console.log(`[test-runner] Done. Exit: ${exitCode}`);
+      send({ type: 'done', exitCode });
+      socket.close(1000);
+    });
+    proc.on('error', e => {
+      console.error('[test-runner] Error:', e.message);
+      send({ type: 'error', message: e.message });
+      socket.close(1000);
+    });
+  });
+
+  socket.on('close', () => console.log('[test-runner] Client disconnected'));
+});
 
 adb.startPolling(3000);
 
