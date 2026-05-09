@@ -1,152 +1,172 @@
 #!/usr/bin/env node
 
 /**
- * flashlighttest - Run Flashlight tests on EC2 and download the report
+ * flashlighttest — Run Flashlight tests on your farm server and pull the report locally.
+ * Works entirely over port 3000 (HTTP + WebSocket). No SSH required.
  *
  * Usage:
  *   flashlighttest sample-test-fl.js
- *   flashlighttest sample-test-fl.js --ec2-dir /home/ubuntu/my-farm
+ *   flashlighttest sample-test-fl.js --no-open
  *
- * Config (set once via env or ~/.flashlighttest.json):
- *   EC2_HOST      - EC2 public IP or hostname  (e.g. 13.239.102.204)
- *   EC2_USER      - SSH user                   (default: ubuntu)
- *   EC2_KEY       - path to .pem key file      (e.g. ~/.ssh/my-key.pem)
- *   EC2_DIR       - project dir on EC2         (default: ~/device-farm)
- *   REPORTS_DIR   - where to save reports locally (default: ./flashlight-reports)
+ * One-time config (~/.flashlighttest.json):
+ *   {
+ *     "host":       "13.239.102.204",
+ *     "port":       "3000",
+ *     "reportsDir": "./flashlight-reports"
+ *   }
  */
 
-const { execSync, spawn } = require('child_process');
-const fs   = require('fs');
-const path = require('path');
-const os   = require('os');
+const { execSync }  = require('child_process');
+const fs            = require('fs');
+const path          = require('path');
+const os            = require('os');
+const WebSocket     = require('ws');
 
-// ─── Colour helpers ───────────────────────────────────────────────────────────
+// ─── Colours ──────────────────────────────────────────────────────────────────
 const c = {
-  reset:  '\x1b[0m',
-  bold:   '\x1b[1m',
-  cyan:   '\x1b[36m',
-  green:  '\x1b[32m',
-  yellow: '\x1b[33m',
-  red:    '\x1b[31m',
-  dim:    '\x1b[2m',
+  reset: '\x1b[0m', bold: '\x1b[1m',
+  cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', dim: '\x1b[2m',
 };
 const log  = (icon, msg) => console.log(`${c.cyan}${icon}${c.reset}  ${msg}`);
 const ok   = (msg)       => console.log(`${c.green}✓${c.reset}  ${msg}`);
 const warn = (msg)       => console.log(`${c.yellow}⚠${c.reset}  ${msg}`);
 const fail = (msg)       => { console.error(`${c.red}✗${c.reset}  ${msg}`); process.exit(1); };
 
-// ─── Load config ──────────────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 function loadConfig() {
   const cfgPath = path.join(os.homedir(), '.flashlighttest.json');
-  let fileCfg = {};
+  let file = {};
   if (fs.existsSync(cfgPath)) {
-    try { fileCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); }
+    try { file = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); }
     catch { warn(`Could not parse ${cfgPath} — ignoring`); }
   }
-
   return {
-    host:       process.env.EC2_HOST       || fileCfg.host,
-    user:       process.env.EC2_USER       || fileCfg.user       || 'ubuntu',
-    key:        process.env.EC2_KEY        || fileCfg.key,
-    ec2Dir:     process.env.EC2_DIR        || fileCfg.ec2Dir      || '~/device-farm',
-    reportsDir: process.env.REPORTS_DIR    || fileCfg.reportsDir  || './flashlight-reports',
+    host:       process.env.EC2_HOST    || file.host,
+    port:       process.env.EC2_PORT    || file.port       || '3000',
+    reportsDir: process.env.REPORTS_DIR || file.reportsDir || './flashlight-reports',
   };
 }
 
-// ─── Parse CLI args ───────────────────────────────────────────────────────────
+// ─── Args ─────────────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
   if (!args.length || args[0] === '--help' || args[0] === '-h') {
     console.log(`
-${c.bold}flashlighttest${c.reset} — run Flashlight tests on EC2 and pull the report locally
+${c.bold}flashlighttest${c.reset} — run Flashlight tests on EC2, stream logs live, download report
 
 ${c.bold}Usage:${c.reset}
-  flashlighttest <test-file.js> [options]
+  flashlighttest <test-file.js> [--no-open]
 
-${c.bold}Options:${c.reset}
-  --ec2-dir <path>      Override EC2 project directory
-  --reports-dir <path>  Override local reports directory
-  --open / --no-open    Auto-open report after download (default: open)
-  --help                Show this help
-
-${c.bold}One-time config (~/.flashlighttest.json):${c.reset}
+${c.bold}Config (~/.flashlighttest.json):${c.reset}
   {
     "host":       "13.239.102.204",
-    "user":       "ubuntu",
-    "key":        "~/.ssh/my-key.pem",
-    "ec2Dir":     "~/device-farm",
+    "port":       "3000",
     "reportsDir": "./flashlight-reports"
   }
-
-${c.bold}Or via environment variables:${c.reset}
-  EC2_HOST, EC2_USER, EC2_KEY, EC2_DIR, REPORTS_DIR
 `);
     process.exit(0);
   }
-
   const testFile = args[0];
-  let ec2Dir, reportsDir, autoOpen = true;
-
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === '--ec2-dir')     { ec2Dir     = args[++i]; }
-    if (args[i] === '--reports-dir') { reportsDir = args[++i]; }
-    if (args[i] === '--open')        { autoOpen   = true; }
-    if (args[i] === '--no-open')     { autoOpen   = false; }
-  }
-
-  return { testFile, ec2Dir, reportsDir, autoOpen };
+  const autoOpen = !args.includes('--no-open');
+  return { testFile, autoOpen };
 }
 
-// ─── SSH helpers ──────────────────────────────────────────────────────────────
-function sshArgs(cfg) {
-  const args = ['-o', 'StrictHostKeyChecking=no', '-o', 'BatchMode=yes'];
-  if (cfg.key) args.push('-i', cfg.key.replace('~', os.homedir()));
-  args.push(`${cfg.user}@${cfg.host}`);
-  return args;
-}
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+function baseUrl(cfg) { return `http://${cfg.host}:${cfg.port}`; }
 
-function sshRun(cfg, cmd) {
-  return execSync(`ssh ${sshArgs(cfg).join(' ')} "${cmd}"`, {
-    encoding: 'utf8',
-    timeout: 5 * 60 * 1000,  // 5 min timeout for long tests
-  }).trim();
-}
-
-function sshStream(cfg, cmd) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('ssh', [...sshArgs(cfg), cmd], { stdio: 'inherit' });
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`Exit code ${code}`)));
+async function httpPost(cfg, endpoint, body) {
+  const res = await fetch(`${baseUrl(cfg)}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
 }
 
-function scpUpload(cfg, localPath, remotePath) {
-  const keyArg = cfg.key ? `-i ${cfg.key.replace('~', os.homedir())}` : '';
-  execSync(
-    `scp -o StrictHostKeyChecking=no ${keyArg} "${localPath}" "${cfg.user}@${cfg.host}:${remotePath}"`,
-    { stdio: 'inherit' }
-  );
+async function httpGet(cfg, endpoint) {
+  const res = await fetch(`${baseUrl(cfg)}${endpoint}`);
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
 }
 
-function scpDownload(cfg, remotePath, localPath) {
-  const keyArg = cfg.key ? `-i ${cfg.key.replace('~', os.homedir())}` : '';
-  execSync(
-    `scp -o StrictHostKeyChecking=no ${keyArg} -r "${cfg.user}@${cfg.host}:${remotePath}" "${localPath}"`,
-    { stdio: 'inherit' }
-  );
+async function httpDelete(cfg, endpoint) {
+  const res = await fetch(`${baseUrl(cfg)}${endpoint}`, { method: 'DELETE' });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
 }
 
-// ─── Open report locally ──────────────────────────────────────────────────────
-function openReport(reportPath) {
-  const platform = process.platform;
-  const cmd = platform === 'darwin' ? 'open'
-            : platform === 'win32'  ? 'start'
-            : 'xdg-open';
-  try {
-    execSync(`${cmd} "${reportPath}"`, { stdio: 'ignore' });
-    ok(`Report opened in browser`);
-  } catch {
-    warn(`Could not auto-open. Open manually:\n   ${reportPath}`);
-  }
+async function httpDownload(cfg, endpoint, localPath) {
+  const res = await fetch(`${baseUrl(cfg)}${endpoint}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buf = await res.arrayBuffer();
+  fs.writeFileSync(localPath, Buffer.from(buf));
+}
+
+// ─── WebSocket — trigger test + stream logs live ──────────────────────────────
+// Protocol:
+//   client → server : { run: 'sample-test-fl.js' }
+//   server → client : { type: 'log',  line: '...' }   (one per stdout/stderr line)
+//   server → client : { type: 'done', exitCode: 0 }   (test finished)
+//   server → client : { type: 'error', message: '...' }
+function runTestOverWebSocket(cfg, testFile) {
+  return new Promise((resolve, reject) => {
+    const wsUrl = `ws://${cfg.host}:${cfg.port}/test-runner`;
+    let settled = false;
+
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      fn(val);
+    };
+
+    let ws;
+    try { ws = new WebSocket(wsUrl); }
+    catch (e) { return reject(new Error(`Could not connect WebSocket: ${e.message}`)); }
+
+    // 10 second connection timeout
+    const connTimeout = setTimeout(() => {
+      ws.terminate();
+      settle(reject, new Error(`WebSocket timed out connecting to ${wsUrl}`));
+    }, 10000);
+
+    ws.on('open', () => {
+      clearTimeout(connTimeout);
+      ws.send(JSON.stringify({ run: testFile }));
+    });
+
+    ws.on('message', raw => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      if (msg.type === 'log') {
+        process.stdout.write(msg.line + '\n');
+      } else if (msg.type === 'done') {
+        ws.close(1000);
+        if (msg.exitCode === 0) settle(resolve);
+        else settle(reject, new Error(`Test exited with code ${msg.exitCode}`));
+      } else if (msg.type === 'error') {
+        ws.close(1000);
+        settle(reject, new Error(msg.message));
+      }
+    });
+
+    ws.on('error', e => {
+      clearTimeout(connTimeout);
+      settle(reject, new Error(`WebSocket error: ${e.message}`));
+    });
+
+    ws.on('close', (code) => {
+      clearTimeout(connTimeout);
+      // Abnormal close and we haven't settled yet → treat as error
+      if (code !== 1000 && code !== 1005) {
+        settle(reject, new Error(`WebSocket closed unexpectedly (code ${code})`));
+      }
+    });
+  });
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -154,106 +174,91 @@ async function main() {
   const args   = parseArgs();
   const config = loadConfig();
 
-  // Merge CLI overrides
-  if (args.ec2Dir)     config.ec2Dir     = args.ec2Dir;
-  if (args.reportsDir) config.reportsDir = args.reportsDir;
+  if (!config.host) fail('Farm host not set. Add "host" to ~/.flashlighttest.json or set EC2_HOST.');
 
-  // Validate config
-  if (!config.host) fail('EC2 host not set. Add "host" to ~/.flashlighttest.json or set EC2_HOST env var.');
-  if (!config.key)  warn('No SSH key set (EC2_KEY). Assuming key-based auth is already configured.');
-
-  const { testFile } = args;
-  const ec2Dir       = config.ec2Dir;
-  const reportsDir   = path.resolve(config.reportsDir);
-  const timestamp    = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const runLabel     = `${path.basename(testFile, '.js')}_${timestamp}`;
+  const { testFile, autoOpen } = args;
+  const reportsDir = path.resolve(config.reportsDir);
 
   console.log(`\n${c.bold}${c.cyan}⚡ flashlighttest${c.reset}\n`);
-  log('🖥 ', `EC2:       ${config.user}@${config.host}`);
-  log('📁', `Remote dir: ${ec2Dir}`);
-  log('🧪', `Test file:  ${testFile}`);
+  log('🖥 ', `Farm:      ${config.host}:${config.port}`);
+  log('🧪', `Test:      ${testFile}`);
   console.log();
 
-  // ── Step 1: Upload test file to EC2 (always sync latest version) ─────────────
-  log('📤', `Uploading ${testFile} to EC2...`);
+  // ── 1. Upload test file via HTTP ──────────────────────────────────────────
+  log('📤', `Uploading ${testFile}...`);
   const localTestPath = path.resolve(testFile);
-  if (!fs.existsSync(localTestPath)) {
-    fail(`Test file not found locally: ${localTestPath}`);
-  }
+  if (!fs.existsSync(localTestPath)) fail(`File not found: ${localTestPath}`);
   try {
-    scpUpload(config, localTestPath, `${ec2Dir}/${testFile}`);
-    ok(`Uploaded ${testFile} to EC2`);
+    const content = fs.readFileSync(localTestPath, 'utf8');
+    await httpPost(config, '/api/deploy', { filename: testFile, content });
+    ok(`Uploaded ${testFile}`);
   } catch (e) {
-    fail(`Failed to upload test file: ${e.message}`);
+    fail(`Upload failed: ${e.message}`);
   }
 
-  // ── Step 2: Run the test on EC2 (stream output live) ────────────────────────
-  log('🚀', 'Running test on EC2 (output streamed live)...\n');
-  const runCmd = `cd ${ec2Dir} && node ${testFile} 2>&1`;
+  // ── 2. Run via WebSocket — live log stream ────────────────────────────────
+  log('🚀', 'Running test (live output):\n');
   try {
-    await sshStream(config, runCmd);
+    await runTestOverWebSocket(config, testFile);
+    console.log();
     ok('Test completed');
   } catch (e) {
-    fail(`Test exited with an error. Check output above.`);
+    console.log();
+    fail(e.message);
   }
 
-  // ── Step 3: Find ALL results_*.json on EC2 (could be multiple) ──────────────
-  log('🔍', 'Locating Flashlight reports on EC2...');
-  let remoteReports;
+  // ── 3. List reports on server ─────────────────────────────────────────────
+  log('🔍', 'Locating reports...');
+  let reports;
   try {
-    const found = sshRun(config, `ls -t ${ec2Dir}/results_*.json 2>/dev/null`);
-    if (!found) fail(`No Flashlight reports (results_*.json) found in ${ec2Dir}.`);
-    remoteReports = found.trim().split('\n').filter(Boolean);
-    log('📋', `Found ${remoteReports.length} report(s) on EC2`);
+    const res = await httpGet(config, '/api/reports');
+    reports = res.reports;
+    if (!reports.length) fail('No reports found — did writeResults() run?');
+    log('📋', `Found ${reports.length} report(s)`);
   } catch (e) {
-    fail(`Could not locate reports: ${e.message}`);
+    fail(`Could not list reports: ${e.message}`);
   }
 
-  // ── Step 4: Download ALL reports, then clean up EC2 ───────────────────────────
-  log('⬇️ ', 'Downloading report(s)...');
+  // ── 4. Download all reports ───────────────────────────────────────────────
+  log('⬇️ ', 'Downloading...');
   fs.mkdirSync(reportsDir, { recursive: true });
-
-  const localReportFiles = [];
-  for (const remotePath of remoteReports) {
-    const basename = path.basename(remotePath, '.json');
-    const localFile = path.join(reportsDir, `${basename}.json`);
+  const downloaded = [];
+  for (const filename of reports) {
+    const localFile = path.join(reportsDir, filename);
     try {
-      scpDownload(config, remotePath, localFile);
-      localReportFiles.push(localFile);
-      ok(`Downloaded: ${path.basename(localFile)}`);
+      await httpDownload(config, `/api/reports/${encodeURIComponent(filename)}`, localFile);
+      downloaded.push(localFile);
+      ok(`Saved: ${filename}`);
     } catch (e) {
-      warn(`Failed to download ${remotePath}: ${e.message}`);
+      warn(`Failed: ${filename} — ${e.message}`);
     }
   }
+  if (!downloaded.length) fail('No reports could be downloaded.');
 
-  if (!localReportFiles.length) fail('No reports could be downloaded.');
-
-  // Clean up all results_*.json from EC2 now that they are safely local
-  log('🧹', 'Cleaning up reports from EC2...');
+  // ── 5. Delete reports from server ─────────────────────────────────────────
+  log('🧹', 'Cleaning up server...');
   try {
-    sshRun(config, `rm -f ${ec2Dir}/results_*.json`);
-    ok('EC2 cleaned up');
+    await httpDelete(config, '/api/reports');
+    ok('Done');
   } catch (e) {
-    warn(`Could not clean EC2: ${e.message}`);
+    warn(`Cleanup failed: ${e.message}`);
   }
 
-  // ── Step 5: Open the most recent report with flashlight viewer ────────────────
-  // Most recent = first in ls -t output = first downloaded
-  const latestReport = localReportFiles[0];
-
-  console.log(`\n${c.bold}${c.green}✅ Done! ${localReportFiles.length} report(s) saved.${c.reset}`);
-  localReportFiles.forEach(f => console.log(`  ${c.dim}•${c.reset} ${f}`));
+  // ── 6. Open latest report locally ─────────────────────────────────────────
+  const latest = downloaded[0];
+  console.log(`\n${c.bold}${c.green}✅ Done!${c.reset}  ${downloaded.length} report(s) → ${reportsDir}`);
+  downloaded.forEach(f => console.log(`  ${c.dim}•${c.reset} ${path.basename(f)}`));
   console.log();
 
-  if (args.autoOpen) {
-    log('🌐', 'Opening latest report with flashlight viewer...');
+  if (autoOpen) {
+    log('🌐', 'Opening report...');
     try {
-      execSync(`npx flashlight report "${latestReport}"`, { stdio: 'inherit' });
+      execSync(`npx flashlight report "${latest}"`, { stdio: 'inherit' });
     } catch {
-      warn(`Could not open automatically. Run manually:\n   npx flashlight report "${latestReport}"`);
+      warn(`Could not open. Run:\n   npx flashlight report "${latest}"`);
     }
   } else {
-    console.log(`To view:\n  npx flashlight report "${latestReport}"\n`);
+    console.log(`To view:\n  npx flashlight report "${latest}"\n`);
   }
 }
 
