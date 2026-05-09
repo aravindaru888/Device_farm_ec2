@@ -35,7 +35,7 @@ server.on('upgrade', (req, socket, head) => {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../dashboard')));
 app.use('/screenshots', express.static(path.join(__dirname, '../data/screenshots')));
-app.use('/reports',     express.static(path.join(__dirname, '../data/reports')));
+//app.use('/reports',     express.static(path.join(__dirname, '../data/reports')));
 
 const upload = multer({
   dest: UPLOADS,
