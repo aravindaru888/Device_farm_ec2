@@ -1,0 +1,315 @@
+#!/usr/bin/env node
+
+/**
+ * flashlight-compare — Compare two Flashlight JSON reports or check against a saved baseline.
+ *
+ * Usage:
+ *   flashlight-compare report-a.json report-b.json
+ *   flashlight-compare --set-baseline report.json [--name action-bar-scroll]
+ *   flashlight-compare --check report.json [--name action-bar-scroll]
+ *
+ * Baselines saved to ~/.flashlight-baselines/
+ */
+
+const fs   = require('fs');
+const path = require('path');
+const os   = require('os');
+
+// ─── Colours ──────────────────────────────────────────────────────────────────
+const c = {
+  reset: '\x1b[0m', bold: '\x1b[1m',
+  cyan: '\x1b[36m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m',
+  dim: '\x1b[2m', white: '\x1b[37m',
+};
+const pass = (msg) => console.log(`  ${c.green}✓${c.reset}  ${msg}`);
+const fail = (msg) => console.log(`  ${c.red}✗${c.reset}  ${msg}`);
+const info = (msg) => console.log(`  ${c.dim}•${c.reset}  ${msg}`);
+
+const BASELINES_DIR = path.join(os.homedir(), '.flashlight-baselines');
+
+// ─── Parse args ───────────────────────────────────────────────────────────────
+function parseArgs() {
+  const args = process.argv.slice(2);
+
+  if (!args.length || args.includes('--help')) {
+    console.log(`
+${c.bold}flashlight-compare${c.reset} — compare Flashlight performance reports
+
+${c.bold}Compare two reports:${c.reset}
+  flashlight-compare before.json after.json
+
+${c.bold}Save a baseline:${c.reset}
+  flashlight-compare --set-baseline report.json
+  flashlight-compare --set-baseline report.json --name action-bar-scroll
+
+${c.bold}Check against baseline:${c.reset}
+  flashlight-compare --check report.json
+  flashlight-compare --check report.json --name action-bar-scroll
+
+${c.bold}List saved baselines:${c.reset}
+  flashlight-compare --list
+`);
+    process.exit(0);
+  }
+
+  if (args.includes('--list')) return { mode: 'list' };
+
+  const nameIdx   = args.indexOf('--name');
+  const name      = nameIdx !== -1 ? args[nameIdx + 1] : 'default';
+
+  if (args.includes('--set-baseline')) {
+    const file = args.find(a => !a.startsWith('--') && a !== args[nameIdx + 1]);
+    return { mode: 'set-baseline', file, name };
+  }
+
+  if (args.includes('--check')) {
+    const file = args.find(a => !a.startsWith('--') && a !== args[nameIdx + 1]);
+    return { mode: 'check', file, name };
+  }
+
+  // Two-file comparison
+  const files = args.filter(a => !a.startsWith('--'));
+  if (files.length === 2) return { mode: 'compare', fileA: files[0], fileB: files[1] };
+
+  console.error('Usage: flashlight-compare <before.json> <after.json>');
+  process.exit(1);
+}
+
+// ─── Extract metrics from report ─────────────────────────────────────────────
+function extractMetrics(report) {
+  const iterations = report.iterations || [];
+  if (!iterations.length) throw new Error('No iterations found in report');
+
+  // Aggregate across all iterations and all samples
+  let totalFps = 0, fpsCount = 0;
+  let totalRam = 0, ramCount = 0;
+  let uiThreadTotal = 0, renderThreadTotal = 0, cpuCount = 0;
+  let droppedFrames = 0, totalFrameSamples = 0;
+
+  // Per-iteration averages (for variance)
+  const iterFps = [];
+  const iterCpu = [];
+
+  for (const iter of iterations) {
+    if (iter.status !== 'SUCCESS') continue;
+    const measures = iter.measures || [];
+
+    let iterFpsSum = 0, iterCpuSum = 0, iterCount = 0;
+
+    for (const m of measures) {
+      if (m.fps !== undefined) {
+        totalFps += m.fps;
+        fpsCount++;
+        iterFpsSum += m.fps;
+        if (m.fps < 55) droppedFrames++; // frames below 55fps = janky
+        totalFrameSamples++;
+      }
+      if (m.ram !== undefined) { totalRam += m.ram; ramCount++; }
+      if (m.cpu?.perName) {
+        uiThreadTotal   += m.cpu.perName['UI Thread']    || 0;
+        renderThreadTotal += m.cpu.perName['RenderThread'] || 0;
+        cpuCount++;
+        iterCpuSum += (m.cpu.perName['UI Thread'] || 0) + (m.cpu.perName['RenderThread'] || 0);
+        iterCount++;
+      }
+    }
+
+    if (iterCount) {
+      iterFps.push(iterFpsSum / measures.filter(m => m.fps !== undefined).length);
+      iterCpu.push(iterCpuSum / iterCount);
+    }
+  }
+
+  const avgFps        = fpsCount        ? totalFps / fpsCount               : 0;
+  const avgRam        = ramCount        ? totalRam / ramCount                : 0;
+  const avgUiThread   = cpuCount        ? uiThreadTotal / cpuCount           : 0;
+  const avgRenderThread = cpuCount      ? renderThreadTotal / cpuCount        : 0;
+  const jankRate      = totalFrameSamples ? (droppedFrames / totalFrameSamples) * 100 : 0;
+
+  // Min FPS across iterations (worst case)
+  const minFps = iterFps.length ? Math.min(...iterFps) : avgFps;
+
+  return {
+    avgFps:           +avgFps.toFixed(2),
+    minFps:           +minFps.toFixed(2),
+    avgRam:           +avgRam.toFixed(2),
+    avgUiThread:      +avgUiThread.toFixed(2),
+    avgRenderThread:  +avgRenderThread.toFixed(2),
+    jankRate:         +jankRate.toFixed(2),
+    iterationCount:   iterations.filter(i => i.status === 'SUCCESS').length,
+  };
+}
+
+// ─── Format delta ─────────────────────────────────────────────────────────────
+function delta(before, after, key, higherIsBetter = true) {
+  const diff    = after[key] - before[key];
+  const pct     = before[key] !== 0 ? (diff / before[key]) * 100 : 0;
+  const improved = higherIsBetter ? diff >= 0 : diff <= 0;
+  const sign    = diff >= 0 ? '+' : '';
+  const colour  = improved ? c.green : c.red;
+  return `${colour}${sign}${diff.toFixed(2)} (${sign}${pct.toFixed(1)}%)${c.reset}`;
+}
+
+function thresholdIcon(ok) { return ok ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`; }
+
+// ─── Print comparison table ───────────────────────────────────────────────────
+function printComparison(labelA, metricsA, labelB, metricsB) {
+  const col = 22;
+  const pad = (s, n) => String(s).padEnd(n);
+
+  console.log();
+  console.log(`${c.bold}${c.cyan}📊 Performance Comparison${c.reset}`);
+  console.log(`${'─'.repeat(72)}`);
+  console.log(`  ${c.bold}${pad('Metric', col)}${pad(labelA, 20)}${pad(labelB, 20)}Change${c.reset}`);
+  console.log(`${'─'.repeat(72)}`);
+
+  const rows = [
+    { label: 'Avg FPS',          key: 'avgFps',          unit: '',   higherBetter: true  },
+    { label: 'Min FPS (worst)',   key: 'minFps',          unit: '',   higherBetter: true  },
+    { label: 'Jank Rate',        key: 'jankRate',        unit: '%',  higherBetter: false },
+    { label: 'Avg RAM',          key: 'avgRam',          unit: 'MB', higherBetter: false },
+    { label: 'UI Thread CPU',    key: 'avgUiThread',     unit: '%',  higherBetter: false },
+    { label: 'RenderThread CPU', key: 'avgRenderThread', unit: '%',  higherBetter: false },
+  ];
+
+  for (const row of rows) {
+    const a   = metricsA[row.key];
+    const b   = metricsB[row.key];
+    const d   = delta(metricsA, metricsB, row.key, row.higherBetter);
+    console.log(`  ${pad(row.label, col)}${pad(a + row.unit, 20)}${pad(b + row.unit, 20)}${d}`);
+  }
+
+  console.log(`${'─'.repeat(72)}`);
+
+  // Summary verdict
+  const fpsDrop    = metricsA.avgFps - metricsB.avgFps;
+  const jankIncrease = metricsB.jankRate - metricsA.jankRate;
+  const ramIncrease = metricsB.avgRam - metricsA.avgRam;
+
+  console.log(`\n${c.bold}Verdict:${c.reset}`);
+  if (fpsDrop > 5)        fail(`FPS dropped by ${fpsDrop.toFixed(1)} — likely visible regression`);
+  else if (fpsDrop > 2)   fail(`FPS dropped by ${fpsDrop.toFixed(1)} — borderline, monitor closely`);
+  else                    pass(`FPS stable (${Math.abs(fpsDrop).toFixed(1)} difference)`);
+
+  if (jankIncrease > 10)  fail(`Jank rate increased by ${jankIncrease.toFixed(1)}% — noticeable stutters`);
+  else if (jankIncrease > 5) fail(`Jank rate up ${jankIncrease.toFixed(1)}%`);
+  else                    pass(`Jank rate stable`);
+
+  if (ramIncrease > 20)   fail(`RAM up ${ramIncrease.toFixed(1)}MB — possible memory leak`);
+  else if (ramIncrease > 10) info(`RAM up ${ramIncrease.toFixed(1)}MB — watch for growth`);
+  else                    pass(`RAM stable`);
+
+  console.log();
+}
+
+// ─── Thresholds for --check mode ─────────────────────────────────────────────
+const THRESHOLDS = {
+  avgFps:     { min: 50,  label: 'Avg FPS ≥ 50'          },
+  minFps:     { min: 40,  label: 'Min FPS ≥ 40'          },
+  jankRate:   { max: 20,  label: 'Jank Rate ≤ 20%'       },
+  avgRam:     { max: 300, label: 'Avg RAM ≤ 300MB'       },
+  avgUiThread:{ max: 40,  label: 'UI Thread CPU ≤ 40%'   },
+};
+
+function checkThresholds(metrics) {
+  console.log(`\n${c.bold}Threshold Check:${c.reset}`);
+  let allPassed = true;
+  for (const [key, threshold] of Object.entries(THRESHOLDS)) {
+    const val = metrics[key];
+    let ok;
+    if (threshold.min !== undefined) ok = val >= threshold.min;
+    else ok = val <= threshold.max;
+    if (!ok) allPassed = false;
+    const line = `${threshold.label}  →  ${val}${key.includes('Ram') ? 'MB' : key.includes('Rate') || key.includes('Thread') ? '%' : ''}`;
+    ok ? pass(line) : fail(line);
+  }
+  return allPassed;
+}
+
+// ─── Baseline helpers ─────────────────────────────────────────────────────────
+function baselinePath(name) {
+  return path.join(BASELINES_DIR, `${name}.json`);
+}
+
+function saveBaseline(metrics, name) {
+  fs.mkdirSync(BASELINES_DIR, { recursive: true });
+  fs.writeFileSync(baselinePath(name), JSON.stringify({ ...metrics, savedAt: new Date().toISOString() }, null, 2));
+  console.log(`\n${c.green}✓${c.reset}  Baseline saved: ${c.bold}${name}${c.reset} → ${baselinePath(name)}`);
+}
+
+function loadBaseline(name) {
+  const p = baselinePath(name);
+  if (!fs.existsSync(p)) {
+    console.error(`${c.red}✗${c.reset}  No baseline found: ${name}\n   Run with --set-baseline first.`);
+    process.exit(1);
+  }
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+// ─── Print metrics summary ────────────────────────────────────────────────────
+function printSummary(label, metrics) {
+  console.log(`\n${c.bold}${c.cyan}📊 ${label}${c.reset}`);
+  console.log(`${'─'.repeat(45)}`);
+  info(`Avg FPS:          ${c.bold}${metrics.avgFps}${c.reset}`);
+  info(`Min FPS (worst):  ${c.bold}${metrics.minFps}${c.reset}`);
+  info(`Jank Rate:        ${c.bold}${metrics.jankRate}%${c.reset}`);
+  info(`Avg RAM:          ${c.bold}${metrics.avgRam} MB${c.reset}`);
+  info(`UI Thread CPU:    ${c.bold}${metrics.avgUiThread}%${c.reset}`);
+  info(`RenderThread CPU: ${c.bold}${metrics.avgRenderThread}%${c.reset}`);
+  info(`Iterations:       ${c.bold}${metrics.iterationCount}${c.reset}`);
+  console.log(`${'─'.repeat(45)}`);
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+function main() {
+  const args = parseArgs();
+
+  if (args.mode === 'list') {
+    if (!fs.existsSync(BASELINES_DIR)) {
+      console.log('No baselines saved yet.');
+      return;
+    }
+    const files = fs.readdirSync(BASELINES_DIR).filter(f => f.endsWith('.json'));
+    if (!files.length) { console.log('No baselines saved yet.'); return; }
+    console.log(`\n${c.bold}Saved baselines:${c.reset}`);
+    for (const f of files) {
+      const data = JSON.parse(fs.readFileSync(path.join(BASELINES_DIR, f), 'utf8'));
+      console.log(`  ${c.cyan}${f.replace('.json', '')}${c.reset}  — saved ${data.savedAt}  avgFPS: ${data.avgFps}`);
+    }
+    console.log();
+    return;
+  }
+
+  if (args.mode === 'set-baseline') {
+    const report  = JSON.parse(fs.readFileSync(args.file, 'utf8'));
+    const metrics = extractMetrics(report);
+    printSummary(path.basename(args.file), metrics);
+    saveBaseline(metrics, args.name);
+    return;
+  }
+
+  if (args.mode === 'check') {
+    const report   = JSON.parse(fs.readFileSync(args.file, 'utf8'));
+    const metrics  = extractMetrics(report);
+    const baseline = loadBaseline(args.name);
+
+    printSummary(path.basename(args.file), metrics);
+    printComparison(`Baseline (${args.name})`, baseline, 'Current run', metrics);
+    const passed = checkThresholds(metrics);
+    console.log();
+    process.exit(passed ? 0 : 1);
+  }
+
+  if (args.mode === 'compare') {
+    const reportA  = JSON.parse(fs.readFileSync(args.fileA, 'utf8'));
+    const reportB  = JSON.parse(fs.readFileSync(args.fileB, 'utf8'));
+    const metricsA = extractMetrics(reportA);
+    const metricsB = extractMetrics(reportB);
+
+    printSummary(path.basename(args.fileA), metricsA);
+    printSummary(path.basename(args.fileB), metricsB);
+    printComparison(path.basename(args.fileA), metricsA, path.basename(args.fileB), metricsB);
+  }
+}
+
+main();
